@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/kong/koko-slack-bot/internal/github"
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
@@ -36,6 +37,8 @@ type Options struct {
 	BotToken string
 	// Debug represents a toggling flag to enable/disable debug output
 	Debug bool
+	// GitHubClient represents the client for accessing GitHub's API
+	GitHubClient *github.Client
 	// Logger represents the base logger to use for the Slack package
 	Logger *zap.Logger
 }
@@ -46,10 +49,24 @@ type Slack struct {
 	client *slack.Client
 	// botID represents the bot identifier for this Slack application
 	botID string
+	// gitHubClient represents the client for accessing GitHub's API
+	gitHubClient *github.Client
 	// handler represents the registration mechanism for Slack events
 	handler *socketmode.SocketmodeHandler
-	// Logger represents the logger to use for the Slack package
+	// logger represents the logger to use for the Slack package
 	logger *zap.Logger
+}
+
+// gatewaySchemaChange represents the response from the processing of the
+// gateway schema change event.
+type gatewaySchemaChange struct {
+	// organization represents the GitHub organization/owner
+	organization string
+	// pullRequest represents the GitHub pull request number associated with the
+	// schema change event
+	pullRequest int
+	// repository represents the GitHub repository
+	repository string
 }
 
 // wrapped logger represents the logger for go-slack logger interface.
@@ -80,6 +97,9 @@ func NewSlack(opts Options) (*Slack, error) {
 	if !strings.HasPrefix(opts.BotToken, "xoxb-") {
 		return nil, errors.New("slack bot token must have the prefix 'xoxb-'")
 	}
+	if opts.GitHubClient == nil {
+		return nil, errors.New("client for GitHub is not set")
+	}
 	if opts.Logger == nil {
 		return nil, errors.New("logger is not set")
 	}
@@ -103,9 +123,10 @@ func NewSlack(opts Options) (*Slack, error) {
 	)
 
 	return &Slack{
-		client:  client,
-		logger:  logger,
-		handler: socketmode.NewSocketmodeHandler(socketClient),
+		client:       client,
+		gitHubClient: opts.GitHubClient,
+		handler:      socketmode.NewSocketmodeHandler(socketClient),
+		logger:       logger,
 	}, nil
 }
 
@@ -204,8 +225,16 @@ func (s *Slack) handleMessageEvent(e *socketmode.Event, c *socketmode.Client) {
 func (s *Slack) handleBotMessage(messageEvent *slackevents.MessageEvent, channelName string) error {
 	switch channelName {
 	case "gateway-schema-change-feed":
-		if err := s.handleGatewaySchemaChangeEvent(messageEvent); err != nil {
-			s.logger.Error("unable to handle gateway schema change event", zap.Error(err))
+		gsc, err := s.handleGatewaySchemaChangeEvent(messageEvent)
+		if err != nil {
+			return fmt.Errorf("unable to handle gateway schema change event: %w", err)
+		}
+
+		// Get the pull request description for the change
+		// TODO(fero): add description variable to use with next steps; Jira integration
+		_, err = s.gitHubClient.PRDescription(gsc.organization, gsc.repository, gsc.pullRequest)
+		if err != nil {
+			return fmt.Errorf("unable to get PR description for gateway schema change event: %w", err)
 		}
 	default:
 		s.logger.Debug("bot message received", zap.String("bot-id", messageEvent.BotID), zap.String("channel", channelName))
@@ -215,63 +244,74 @@ func (s *Slack) handleBotMessage(messageEvent *slackevents.MessageEvent, channel
 
 // handleGatewaySchemaChangeEvent will process all Kong Gateway schema change
 // events that occur from #gateway-schema-change-feed on Slack.
-func (s *Slack) handleGatewaySchemaChangeEvent(messageEvent *slackevents.MessageEvent) error {
+func (s *Slack) handleGatewaySchemaChangeEvent(messageEvent *slackevents.MessageEvent) (gatewaySchemaChange, error) {
 	s.logger.Debug("gateway change event received", zap.Any("message-event", messageEvent))
 	if len(messageEvent.BotID) == 0 {
-		return errors.New("bot ID is missing from message event")
+		return gatewaySchemaChange{}, errors.New("bot ID is missing from message event")
 	}
 	numOfAttachments := len(messageEvent.Attachments)
 	if numOfAttachments == 0 {
-		return errors.New("attachments are missing from message event")
+		return gatewaySchemaChange{}, errors.New("attachments are missing from message event")
 	}
 	if numOfAttachments > 1 {
-		return fmt.Errorf("too many attachments from message event: %d > 1", numOfAttachments)
+		return gatewaySchemaChange{}, fmt.Errorf("too many attachments from message event: %d > 1", numOfAttachments)
 	}
 
 	// Get author of the commit from the attachment
 	author := messageEvent.Attachments[0].AuthorName
 	if len(author) == 0 {
-		return errors.New("gateway change event is missing author")
+		return gatewaySchemaChange{}, errors.New("gateway change event is missing author")
 	}
 
 	// Get the organization, repository, and pull request from the attachment
 	var pullRequest int64 = math.MinInt64
-	var orgAndRepository string
+	var organization string
+	var repository string
 	for _, field := range messageEvent.Attachments[0].Fields {
 		switch strings.ToLower(field.Title) {
 		case "ref":
 			tokens := strings.Split(field.Value, "/")
 			numOfTokens := len(tokens)
 			if numOfTokens < 3 {
-				return fmt.Errorf("not enough tokens in ref value to parse pull request: %d < 3", numOfTokens)
+				return gatewaySchemaChange{},
+					fmt.Errorf("not enough tokens in ref value to parse pull request: %d < 3", numOfTokens)
 			}
 			var err error
 			pullRequest, err = strconv.ParseInt(tokens[2], 10, 0)
 			if err != nil {
-				return fmt.Errorf("unable to convert pull request to number: %s", tokens[2])
+				return gatewaySchemaChange{}, fmt.Errorf("unable to convert pull request to number: %s", tokens[2])
 			}
 		case "commit":
 			tokens := strings.Split(field.Value, "|")
 			numOfTokens := len(tokens)
 			if numOfTokens != 2 {
-				return fmt.Errorf("invalid commit value format: %s", field.Value)
+				return gatewaySchemaChange{}, fmt.Errorf("invalid commit value format: %s", field.Value)
 			}
 			tokens = strings.Split(tokens[0], "/")
 			numOfTokens = len(tokens)
 			if numOfTokens < 5 {
-				return fmt.Errorf("not enough tokens in commit value to parse repository: %d < 5", numOfTokens)
+				return gatewaySchemaChange{},
+					fmt.Errorf("not enough tokens in commit value to parse repository: %d < 5", numOfTokens)
 			}
-			orgAndRepository = fmt.Sprintf("%s/%s", tokens[3], tokens[4])
+			organization = tokens[3]
+			repository = tokens[4]
 		}
 	}
 
 	// Ensure the attachments contains the appropriate information
 	if pullRequest == math.MinInt64 {
-		return errors.New("pull request number was not present in message event")
+		return gatewaySchemaChange{}, errors.New("pull request number was not present in message event")
 	}
-	if len(orgAndRepository) == 0 {
-		return errors.New("organization and repository was not present in message event")
+	if len(organization) == 0 {
+		return gatewaySchemaChange{}, errors.New("organization was not present in message event")
+	}
+	if len(repository) == 0 {
+		return gatewaySchemaChange{}, errors.New("repository was not present in message event")
 	}
 
-	return nil
+	return gatewaySchemaChange{
+		organization: organization,
+		pullRequest:  int(pullRequest),
+		repository:   repository,
+	}, nil
 }

@@ -18,6 +18,7 @@ package slack
 import (
 	"encoding/json"
 
+	"github.com/kong/koko-slack-bot/internal/github"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/slack-go/slack"
@@ -38,9 +39,10 @@ var _ = Describe("slack", func() {
 		When("the options are valid", func() {
 			It("a new slack instance will be instantiated", func() {
 				s, err := NewSlack(Options{
-					AppToken: "xapp-",
-					BotToken: "xoxb-",
-					Logger:   logger,
+					AppToken:     "xapp-",
+					BotToken:     "xoxb-",
+					Logger:       logger,
+					GitHubClient: &github.Client{},
 				})
 				Expect(err).NotTo(HaveOccurred())
 				Expect(s).NotTo(BeNil())
@@ -91,11 +93,24 @@ var _ = Describe("slack", func() {
 				})
 			})
 
-			Context("and the logger is missing", func() {
+			Context("and the GitHub client is missing", func() {
 				It("a new slack instance will not be instantiated", func() {
 					s, err := NewSlack(Options{
 						AppToken: "xapp-",
 						BotToken: "xoxb-",
+					})
+					Expect(err).To(HaveOccurred())
+					Expect(err).Should(MatchError("client for GitHub is not set"))
+					Expect(s).To(BeNil())
+				})
+			})
+
+			Context("and the logger is missing", func() {
+				It("a new slack instance will not be instantiated", func() {
+					s, err := NewSlack(Options{
+						AppToken:     "xapp-",
+						BotToken:     "xoxb-",
+						GitHubClient: &github.Client{},
 					})
 					Expect(err).To(HaveOccurred())
 					Expect(err).Should(MatchError("logger is not set"))
@@ -111,9 +126,10 @@ var _ = Describe("slack", func() {
 		BeforeEach(func() {
 			var err error
 			s, err = NewSlack(Options{
-				AppToken: "xapp-",
-				BotToken: "xoxb-",
-				Logger:   logger,
+				AppToken:     "xapp-",
+				BotToken:     "xoxb-",
+				Logger:       logger,
+				GitHubClient: &github.Client{},
 			})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(s).NotTo(BeNil())
@@ -173,32 +189,39 @@ var _ = Describe("slack", func() {
 					})
 
 					It("the gateway schema change event will be handled without error", func() {
-						err := s.handleGatewaySchemaChangeEvent(&messageEvent)
+						gsc, err := s.handleGatewaySchemaChangeEvent(&messageEvent)
 						Expect(err).NotTo(HaveOccurred())
+						Expect(gsc).Should(BeEquivalentTo(gatewaySchemaChange{
+							organization: "kong",
+							repository:   "team-koko-bot",
+							pullRequest:  5291,
+						}))
 					})
 				})
 
 				When("message event does not contain the bot id", func() {
 					It("the gateway schema change event will not be handled and fail", func() {
-						err := s.handleGatewaySchemaChangeEvent(&slackevents.MessageEvent{})
+						gsc, err := s.handleGatewaySchemaChangeEvent(&slackevents.MessageEvent{})
 						Expect(err).To(HaveOccurred())
 						Expect(err).Should(MatchError("bot ID is missing from message event"))
+						Expect(gsc).Should(Equal(gatewaySchemaChange{}))
 					})
 				})
 
 				When("message event does not contain attachments", func() {
 					It("the gateway schema change event will not be handled and fail", func() {
-						err := s.handleGatewaySchemaChangeEvent(&slackevents.MessageEvent{
+						gsc, err := s.handleGatewaySchemaChangeEvent(&slackevents.MessageEvent{
 							BotID: "id",
 						})
 						Expect(err).To(HaveOccurred())
 						Expect(err).Should(MatchError("attachments are missing from message event"))
+						Expect(gsc).Should(Equal(gatewaySchemaChange{}))
 					})
 				})
 
 				When("message event contains too many attachments", func() {
 					It("the gateway schema change event will not be handled and fail", func() {
-						err := s.handleGatewaySchemaChangeEvent(&slackevents.MessageEvent{
+						gsc, err := s.handleGatewaySchemaChangeEvent(&slackevents.MessageEvent{
 							BotID: "id",
 							Attachments: []slack.Attachment{
 								{},
@@ -207,12 +230,13 @@ var _ = Describe("slack", func() {
 						})
 						Expect(err).To(HaveOccurred())
 						Expect(err).Should(MatchError("too many attachments from message event: 2 > 1"))
+						Expect(gsc).Should(Equal(gatewaySchemaChange{}))
 					})
 				})
 
 				When("message event does not contain author", func() {
 					It("the gateway schema change event will not be handled and fail", func() {
-						err := s.handleGatewaySchemaChangeEvent(&slackevents.MessageEvent{
+						gsc, err := s.handleGatewaySchemaChangeEvent(&slackevents.MessageEvent{
 							BotID: "id",
 							Attachments: []slack.Attachment{
 								{},
@@ -220,12 +244,13 @@ var _ = Describe("slack", func() {
 						})
 						Expect(err).To(HaveOccurred())
 						Expect(err).Should(MatchError("gateway change event is missing author"))
+						Expect(gsc).Should(Equal(gatewaySchemaChange{}))
 					})
 				})
 
 				When("message event contains attachments with invalid ref value", func() {
 					It("the gateway schema change event will not be handled and fail", func() {
-						err := s.handleGatewaySchemaChangeEvent(&slackevents.MessageEvent{
+						gsc, err := s.handleGatewaySchemaChangeEvent(&slackevents.MessageEvent{
 							BotID: "id",
 							Attachments: []slack.Attachment{
 								{
@@ -241,12 +266,13 @@ var _ = Describe("slack", func() {
 						})
 						Expect(err).To(HaveOccurred())
 						Expect(err).Should(MatchError("not enough tokens in ref value to parse pull request: 2 < 3"))
+						Expect(gsc).Should(Equal(gatewaySchemaChange{}))
 					})
 				})
 
 				When("message event contains attachments with invalid pull request number in ref value", func() {
 					It("the gateway schema change event will not be handled and fail", func() {
-						err := s.handleGatewaySchemaChangeEvent(&slackevents.MessageEvent{
+						gsc, err := s.handleGatewaySchemaChangeEvent(&slackevents.MessageEvent{
 							BotID: "id",
 							Attachments: []slack.Attachment{
 								{
@@ -262,12 +288,13 @@ var _ = Describe("slack", func() {
 						})
 						Expect(err).To(HaveOccurred())
 						Expect(err).Should(MatchError("unable to convert pull request to number: not-a-number"))
+						Expect(gsc).Should(Equal(gatewaySchemaChange{}))
 					})
 				})
 
 				When("message event contains attachments with invalid format for commit value", func() {
 					It("the gateway schema change event will not be handled and fail", func() {
-						err := s.handleGatewaySchemaChangeEvent(&slackevents.MessageEvent{
+						gsc, err := s.handleGatewaySchemaChangeEvent(&slackevents.MessageEvent{
 							BotID: "id",
 							Attachments: []slack.Attachment{
 								{
@@ -287,12 +314,13 @@ var _ = Describe("slack", func() {
 						})
 						Expect(err).To(HaveOccurred())
 						Expect(err).Should(MatchError("invalid commit value format: https://github.com/kong"))
+						Expect(gsc).Should(Equal(gatewaySchemaChange{}))
 					})
 				})
 
 				When("message event contains attachments with invalid number of tokens for commit value", func() {
 					It("the gateway schema change event will not be handled and fail", func() {
-						err := s.handleGatewaySchemaChangeEvent(&slackevents.MessageEvent{
+						gsc, err := s.handleGatewaySchemaChangeEvent(&slackevents.MessageEvent{
 							BotID: "id",
 							Attachments: []slack.Attachment{
 								{
@@ -312,12 +340,13 @@ var _ = Describe("slack", func() {
 						})
 						Expect(err).To(HaveOccurred())
 						Expect(err).Should(MatchError("not enough tokens in commit value to parse repository: 4 < 5"))
+						Expect(gsc).Should(Equal(gatewaySchemaChange{}))
 					})
 				})
 
 				When("message event contains attachments however is missing pull request ref", func() {
 					It("the gateway schema change event will not be handled and fail", func() {
-						err := s.handleGatewaySchemaChangeEvent(&slackevents.MessageEvent{
+						gsc, err := s.handleGatewaySchemaChangeEvent(&slackevents.MessageEvent{
 							BotID: "id",
 							Attachments: []slack.Attachment{
 								{
@@ -333,12 +362,13 @@ var _ = Describe("slack", func() {
 						})
 						Expect(err).To(HaveOccurred())
 						Expect(err).Should(MatchError("pull request number was not present in message event"))
+						Expect(gsc).Should(Equal(gatewaySchemaChange{}))
 					})
 				})
 
-				When("message event contains attachments however is missing organization and repository commit", func() {
+				When("message event contains attachments however is missing organization and repository in commit field", func() {
 					It("the gateway schema change event will not be handled and fail", func() {
-						err := s.handleGatewaySchemaChangeEvent(&slackevents.MessageEvent{
+						gsc, err := s.handleGatewaySchemaChangeEvent(&slackevents.MessageEvent{
 							BotID: "id",
 							Attachments: []slack.Attachment{
 								{
@@ -353,7 +383,34 @@ var _ = Describe("slack", func() {
 							},
 						})
 						Expect(err).To(HaveOccurred())
-						Expect(err).Should(MatchError("organization and repository was not present in message event"))
+						Expect(err).Should(MatchError("organization was not present in message event"))
+						Expect(gsc).Should(Equal(gatewaySchemaChange{}))
+					})
+				})
+
+				When("message event contains attachments however is missing repository in commit field", func() {
+					It("the gateway schema change event will not be handled and fail", func() {
+						gsc, err := s.handleGatewaySchemaChangeEvent(&slackevents.MessageEvent{
+							BotID: "id",
+							Attachments: []slack.Attachment{
+								{
+									AuthorName: "team-koko-bot",
+									Fields: []slack.AttachmentField{
+										{
+											Title: "Ref",
+											Value: "refs/pull/1",
+										},
+										{
+											Title: "Commit",
+											Value: "https://github.com/kong/|sha",
+										},
+									},
+								},
+							},
+						})
+						Expect(err).To(HaveOccurred())
+						Expect(err).Should(MatchError("repository was not present in message event"))
+						Expect(gsc).Should(Equal(gatewaySchemaChange{}))
 					})
 				})
 			})
