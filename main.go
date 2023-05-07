@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/kong/koko-slack-bot/internal/github"
 	"github.com/kong/koko-slack-bot/internal/slack"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -29,6 +30,7 @@ var BotID string
 func main() {
 	appToken := os.Getenv("SLACK_APP_TOKEN")
 	botToken := os.Getenv("SLACK_BOT_TOKEN")
+	gitHubToken := os.Getenv("GITHUB_TOKEN")
 
 	logConfig := zap.NewProductionConfig()
 	logConfig.Encoding = "console"
@@ -41,11 +43,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	githubClient, err := github.NewClient(github.Options{
+		Token:  gitHubToken,
+		Logger: logger,
+	})
+	if err != nil {
+		logger.Error("unable to create GitHub client", zap.Error(err))
+		os.Exit(1)
+	}
+
 	s, err := slack.NewSlack(slack.Options{
-		AppToken: appToken,
-		BotToken: botToken,
-		Debug:    true,
-		Logger:   logger,
+		AppToken:     appToken,
+		BotToken:     botToken,
+		Debug:        true,
+		GitHubClient: githubClient,
+		Logger:       logger,
 	})
 	if err != nil {
 		logger.Error("unable to create Slack instance", zap.Error(err))
